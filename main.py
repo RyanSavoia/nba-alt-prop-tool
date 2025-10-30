@@ -2,9 +2,10 @@ import requests
 import pandas as pd
 import time, json, os, logging, threading
 from datetime import datetime, timedelta, timezone
+from nba_api.stats.static import players
+from nba_api.stats.endpoints import PlayerGameLog
 from flask import Flask, jsonify
 from flask_cors import CORS
-from apscheduler.schedulers.background import BackgroundScheduler
 
 # ---------------- CONFIG ----------------
 logging.basicConfig(level=logging.INFO)
@@ -63,10 +64,6 @@ def get_upcoming_games_filter():
 
 # ---------------- NBA LOGIC ----------------
 def fetch_nba_props():
-    # Import heavy nba_api modules inside function to prevent slow startup
-    from nba_api.stats.static import players
-    from nba_api.stats.endpoints import PlayerGameLog
-
     global latest_props_data
     try:
         logger.info("Starting full NBA props update (SEASON CONSISTENCY)...")
@@ -93,7 +90,7 @@ def fetch_nba_props():
         # 2. Markets
         markets = ",".join(["player_points", "player_rebounds", "player_assists", "player_threes"])
 
-        # 3. Gather props
+        # 3. Gather all props
         props = []
         for ev in events_to_check:
             event_id = ev["id"]
@@ -130,7 +127,7 @@ def fetch_nba_props():
 
         logger.info(f"Pulled {len(props)} props in odds range.")
 
-        # 4. Market → stat mapping
+        # 4. Stat mapping
         market_to_stat = {
             "player_points": "PTS",
             "player_rebounds": "REB",
@@ -139,6 +136,7 @@ def fetch_nba_props():
         }
 
         def get_player_logs(player_name):
+            """Load from cache or nba_api"""
             if player_name in cache:
                 return pd.DataFrame(cache[player_name]["data"])
             time.sleep(SLEEP_BETWEEN_REQUESTS)
@@ -158,6 +156,7 @@ def fetch_nba_props():
                 logger.warning(f"Failed logs for {player_name}: {e}")
                 return pd.DataFrame()
 
+        # 5. Check props in batches
         prop_groups, total_checked = {}, 0
         total_batches = (len(props) // BATCH_SIZE) + 1
 
@@ -198,7 +197,7 @@ def fetch_nba_props():
                         "odds": int(p["odds"])
                     })
             save_cache(cache)
-            if b < total_batches - 1:
+            if b < total_batches-1:
                 logger.info(f"Batch {b+1} complete. Sleeping {SLEEP_BETWEEN_BATCHES}s...")
                 time.sleep(SLEEP_BETWEEN_BATCHES)
 
@@ -254,34 +253,22 @@ def index():
     return jsonify(data)
 
 @app.route('/props')
-def get_props():
+def get_props(): 
     return index()
 
 @app.route('/health')
 def health():
     return jsonify({
-        "status": "healthy",
-        "last_updated": latest_props_data.get("last_updated"),
-        "props_count": len(latest_props_data.get("props", []))
+        "status":"healthy",
+        "last_updated":latest_props_data.get("last_updated"),
+        "props_count":len(latest_props_data.get("props",[]))
     })
 
-@app.route('/ping')
-def ping():
-    return "pong", 200
-
-# ---------------- SCHEDULER ----------------
-def init_scheduler():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(fetch_nba_props, "interval", hours=24, id="fetch_nba_props", replace_existing=True)
-    scheduler.start()
-    logger.info("Scheduler started - daily NBA props update")
-
 # ---------------- MAIN ----------------
-if __name__ == "__main__":
-    # start scheduler immediately (non-blocking)
-    init_scheduler()
+if __name__ == '__main__':
+    # Start data fetch in background thread so Flask can boot immediately
+    threading.Thread(target=fetch_nba_props, daemon=True).start()
 
-    # run Flask (Railway health check sees this instantly)
-    port = int(os.getenv("PORT", 5000))
+    port = int(os.getenv('PORT', 5000))
     logger.info(f"Starting Flask server on port {port}...")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False)
