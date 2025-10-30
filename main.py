@@ -2,8 +2,6 @@ import requests
 import pandas as pd
 import time, json, os, logging, threading
 from datetime import datetime, timedelta, timezone
-from nba_api.stats.static import players
-from nba_api.stats.endpoints import PlayerGameLog
 from flask import Flask, jsonify
 from flask_cors import CORS
 
@@ -64,6 +62,10 @@ def get_upcoming_games_filter():
 
 # ---------------- NBA LOGIC ----------------
 def fetch_nba_props():
+    # Import inside the function to avoid slow startup
+    from nba_api.stats.static import players
+    from nba_api.stats.endpoints import PlayerGameLog
+
     global latest_props_data
     try:
         logger.info("Starting full NBA props update (SEASON CONSISTENCY)...")
@@ -253,22 +255,33 @@ def index():
     return jsonify(data)
 
 @app.route('/props')
-def get_props(): 
+def get_props():
     return index()
 
 @app.route('/health')
 def health():
     return jsonify({
-        "status":"healthy",
-        "last_updated":latest_props_data.get("last_updated"),
-        "props_count":len(latest_props_data.get("props",[]))
+        "status": "healthy",
+        "last_updated": latest_props_data.get("last_updated"),
+        "props_count": len(latest_props_data.get("props", []))
     })
 
+@app.route('/ping')
+def ping():
+    return "pong", 200
+
 # ---------------- MAIN ----------------
-if __name__ == '__main__':
-    # Start data fetch in background thread so Flask can boot immediately
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 5000))
+    logger.info(f"Starting Flask server on port {port}...")
+
+    # Start Flask immediately in a background thread so Railway sees it
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False), daemon=True).start()
+
+    # Wait for Flask to bind, then begin data fetch
+    time.sleep(10)
     threading.Thread(target=fetch_nba_props, daemon=True).start()
 
-    port = int(os.getenv('PORT', 5000))
-    logger.info(f"Starting Flask server on port {port}...")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # Keep the main thread alive indefinitely
+    while True:
+        time.sleep(3600)
