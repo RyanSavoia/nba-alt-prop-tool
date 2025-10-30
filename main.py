@@ -37,8 +37,7 @@ def load_cache():
         with open(CACHE_FILE, "r") as f:
             cache = json.load(f)
         cutoff = (datetime.now(ET) - timedelta(hours=CACHE_TTL_HOURS)).timestamp()
-        # remove old entries
-        return {k:v for k,v in cache.items() if v.get("timestamp",0) > cutoff}
+        return {k: v for k, v in cache.items() if v.get("timestamp", 0) > cutoff}
     except Exception:
         return {}
 
@@ -87,9 +86,6 @@ def fetch_nba_props():
                     "error": "No NBA games found"
                 })
             return
-
-        games_info = [{"matchup": f"{ev['away_team']} @ {ev['home_team']}",
-                       "time": format_game_time(ev["commence_time"])} for ev in events_to_check]
 
         # 2. Markets
         markets = ",".join(["player_points", "player_rebounds", "player_assists", "player_threes"])
@@ -151,8 +147,10 @@ def fetch_nba_props():
                 pid = match[0]['id']
                 gamelog = PlayerGameLog(player_id=pid, season='2024-25', season_type_all_star='Regular Season')
                 df = gamelog.get_data_frames()[0]
-                cache[player_name] = {"data": df[['GAME_DATE','PTS','REB','AST','FG3M']].to_dict(orient='records'),
-                                      "timestamp": datetime.now(ET).timestamp()}
+                cache[player_name] = {
+                    "data": df[['GAME_DATE','PTS','REB','AST','FG3M']].to_dict(orient='records'),
+                    "timestamp": datetime.now(ET).timestamp()
+                }
                 return df
             except Exception as e:
                 logger.warning(f"Failed logs for {player_name}: {e}")
@@ -218,8 +216,8 @@ def fetch_nba_props():
                 "last_updated": datetime.now(ET).isoformat(),
                 "props": qualifying,
                 "summary": {
-                    "total_games": len(events_to_check),
-                    "total_props": len(qualifying),
+                    "total_props_checked": total_checked,
+                    "total_consistent": len(qualifying),
                     "odds_range": "-600 to -150",
                     "cache_size": len(cache),
                     "batches_processed": total_batches,
@@ -255,7 +253,8 @@ def index():
     return jsonify(data)
 
 @app.route('/props')
-def get_props(): return index()
+def get_props(): 
+    return index()
 
 @app.route('/health')
 def health():
@@ -267,6 +266,9 @@ def health():
 
 # ---------------- MAIN ----------------
 if __name__ == '__main__':
-    fetch_nba_props()  # run once (Railway cron will trigger daily)
+    # Start data fetch in background thread so Flask can boot immediately
+    threading.Thread(target=fetch_nba_props, daemon=True).start()
+
     port = int(os.getenv('PORT', 5000))
+    logger.info(f"Starting Flask server on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False)
