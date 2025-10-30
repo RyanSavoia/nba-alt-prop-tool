@@ -1,6 +1,7 @@
-flask
-flask-cors
-requests
-pandas
-nba_api
-apscheduler
+Flask==2.3.3
+flask-cors==4.0.0
+requests==2.31.0
+pandas==1.5.3
+numpy==1.24.3
+nba_api==1.4.1
+APScheduler==3.10.4
