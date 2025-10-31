@@ -69,17 +69,17 @@ def get_upcoming_games_filter():
 def current_nba_season_label(dt: datetime) -> str:
     # NBA season starts in Oct; label "YYYY-YY" (e.g., 2025-26)
     year = dt.year
-    if dt.month >= 10:   # Oct-Dec -> season starts this year
+    if dt.month >= 10:   # Oct–Dec -> season starts this year
         start = year
         end = (year + 1) % 100
-    else:                # Jan-Sep -> season started last year
+    else:                # Jan–Sep -> season started last year
         start = year - 1
         end = year % 100
     return f"{start}-{end:02d}"
 
 # ---------------- NBA LOGIC ----------------
 def fetch_nba_props():
-    # Import heavy nba_api modules **inside** to avoid slow startup blocking
+    # Import heavy nba_api modules inside to avoid slow startup
     from nba_api.stats.static import players
     from nba_api.stats.endpoints import PlayerGameLog
 
@@ -109,7 +109,7 @@ def fetch_nba_props():
         # 2) Markets
         markets = ",".join(["player_points", "player_rebounds", "player_assists", "player_threes"])
 
-        # 3) Collect all props within odds band
+        # 3) Collect props
         props = []
         for ev in events_to_check:
             event_id = ev["id"]
@@ -145,8 +145,6 @@ def fetch_nba_props():
                             })
 
         logger.info(f"Pulled {len(props)} props in odds range.")
-
-        # 4) Market → stat mapping
         market_to_stat = {
             "player_points": "PTS",
             "player_rebounds": "REB",
@@ -172,7 +170,6 @@ def fetch_nba_props():
                     season_type_all_star='Regular Season'
                 )
                 df = gamelog.get_data_frames()[0]
-                # cache minimal columns
                 cache[player_name] = {
                     "data": df[['GAME_DATE','PTS','REB','AST','FG3M']].to_dict(orient='records'),
                     "timestamp": datetime.now(ET).timestamp()
@@ -182,7 +179,6 @@ def fetch_nba_props():
                 logger.warning(f"Failed logs for {player_name}: {e}")
                 return pd.DataFrame()
 
-        # 5) Evaluate in batches; push partials after each batch
         prop_groups, total_checked = {}, 0
         total_batches = (len(props) // BATCH_SIZE) + (1 if len(props) % BATCH_SIZE else 0)
 
@@ -196,7 +192,6 @@ def fetch_nba_props():
                 stat_col = market_to_stat.get(p["market"])
                 if not stat_col:
                     continue
-
                 df = get_player_logs(p["player"])
                 if df.empty:
                     continue
@@ -210,12 +205,14 @@ def fetch_nba_props():
                         continue
                     hit_rate = 1.0
                 else:
-                    hits = sum(1 for v in vals if (v > p["line"]) if p["side"] == "Over" else (v < p["line"]))
+                    if p["side"] == "Over":
+                        hits = sum(1 for v in vals if v > p["line"])
+                    else:
+                        hits = sum(1 for v in vals if v < p["line"])
                     hit_rate = hits / len(vals)
                     if hit_rate < SEASON_THRESHOLD:
                         continue
 
-                # Qualified
                 prop_key = (p["player"], p["market"], p["line"], p["side"], p["game"])
                 if prop_key not in prop_groups:
                     avg_val = sum(vals)/len(vals)
@@ -241,7 +238,6 @@ def fetch_nba_props():
                     "odds": int(p["odds"])
                 })
 
-            # persist cache and push partials to the API response
             save_cache(cache)
             with data_lock:
                 latest_props_data.update({
@@ -257,13 +253,11 @@ def fetch_nba_props():
                     },
                     "error": None
                 })
-
             if b < total_batches - 1:
                 logger.info(f"Batch {b+1} complete. Sleeping {SLEEP_BETWEEN_BATCHES}s...")
                 time.sleep(SLEEP_BETWEEN_BATCHES)
 
         logger.info(f"NBA update complete! Checked {total_checked} props; Found {len(prop_groups)} qualified.")
-        # final write (already written as partials, but finalize once more)
         with data_lock:
             latest_props_data["last_updated"] = datetime.now(ET).isoformat()
             latest_props_data["props"] = _dedupe_and_sort_bookmakers(list(prop_groups.values()))
@@ -283,7 +277,7 @@ def _dedupe_and_sort_bookmakers(items):
             key = (bm["name"], bm["odds"])
             if key not in seen:
                 seen.add(key); uniq.append(bm)
-        prop_data = dict(prop_data)  # shallow copy
+        prop_data = dict(prop_data)
         prop_data["bookmakers"] = sorted(uniq, key=lambda x: x["odds"], reverse=True)
         out.append(prop_data)
     return out
@@ -324,16 +318,13 @@ def ping():
 # ---------------- SCHEDULER & MAIN ----------------
 def start_scheduler():
     sched = BackgroundScheduler()
-    # run every 30 minutes (match NFL cadence for now)
     sched.add_job(fetch_nba_props, "interval", minutes=30, id="fetch_nba_props", replace_existing=True)
     sched.start()
     logger.info("Scheduler started - NBA props update every 30 minutes")
 
 if __name__ == '__main__':
-    # kick one fetch immediately (in background) so you see data soon after deploy
+    # run one fetch immediately so data appears quickly
     threading.Thread(target=fetch_nba_props, daemon=True).start()
-
-    # start scheduler after Flask binds
     start_scheduler()
 
     port = int(os.getenv('PORT', 8080))
