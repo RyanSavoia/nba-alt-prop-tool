@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app, origins=[
     "https://dashboard.thebettinginsider.com",
+    "https://www.thebettinginsider.com",
+    "https://thebettinginsider.com",
     "http://localhost:3000",
     "http://localhost:3001"
 ])
