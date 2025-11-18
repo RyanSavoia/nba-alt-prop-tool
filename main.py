@@ -27,10 +27,8 @@ SLEEP_BETWEEN_REQUESTS = float(os.getenv("SLEEP_BETWEEN_REQUESTS", "0.4"))
 SLEEP_BETWEEN_BATCHES = int(os.getenv("SLEEP_BETWEEN_BATCHES", "60"))
 ET = timezone(timedelta(hours=-5))
 
-# Qualification knobs
-STRICT_ALL = os.getenv("STRICT_ALL", "1") == "1"      # default: require 100% of games hit
-SEASON_THRESHOLD = float(os.getenv("SEASON_THRESHOLD", "0.90"))  # only used if STRICT_ALL=0
-MIN_GAMES = int(os.getenv("MIN_GAMES", "4"))
+# Minimum consecutive games required
+MIN_CONSECUTIVE_GAMES = int(os.getenv("MIN_CONSECUTIVE_GAMES", "8"))
 
 latest_props_data = {"last_updated": None, "props": [], "summary": {}, "error": None}
 data_lock = threading.Lock()
@@ -69,7 +67,7 @@ def get_upcoming_games_filter():
     return should_include_game
 
 def current_nba_season_label(dt: datetime) -> str:
-    # NBA season starts in Oct; label "YYYY-YY" (e.g., 2025-26)
+    # NBA season starts in Oct; label "YYYY-YY" (e.g., 2024-25)
     year = dt.year
     if dt.month >= 10:   # Oct–Dec -> season starts this year
         start = year
@@ -87,7 +85,7 @@ def fetch_nba_props():
 
     global latest_props_data
     try:
-        logger.info("Starting NBA props update (SEASON CONSISTENCY)...")
+        logger.info("Starting NBA props update (CONSECUTIVE GAMES LOGIC)...")
         cache = load_cache()
 
         # 1) Events from Odds API
@@ -107,6 +105,13 @@ def fetch_nba_props():
                     "error": None
                 })
             return
+
+        games_info = []
+        for ev in events_to_check:
+            games_info.append({
+                "matchup": f"{ev['away_team']} @ {ev['home_team']}",
+                "time": format_game_time(ev["commence_time"])
+            })
 
         # 2) Markets
         markets = ",".join(["player_points", "player_rebounds", "player_assists", "player_threes"])
@@ -181,6 +186,39 @@ def fetch_nba_props():
                 logger.warning(f"Failed logs for {player_name}: {e}")
                 return pd.DataFrame()
 
+        def qualifies_consecutive(df: pd.DataFrame, stat_col: str, line: float, side: str):
+            """
+            Check if player has hit the line in at least MIN_CONSECUTIVE_GAMES consecutive games.
+            Returns (qualifies: bool, consecutive_values: list)
+            Similar to NFL logic - returns ALL consecutive games from most recent.
+            """
+            if df.empty or len(df) < MIN_CONSECUTIVE_GAMES:
+                return False, []
+            
+            # Get stat values in reverse chronological order (most recent first)
+            vals = df[stat_col].tolist()
+            
+            # Find consecutive streak from most recent games
+            consecutive_games = []
+            for val in vals:
+                # Check if this game hits the line
+                if side == "Over":
+                    hits = val > line
+                else:  # Under
+                    hits = val < line
+                
+                if hits:
+                    consecutive_games.append(val)
+                else:
+                    # Streak broken, stop here
+                    break
+            
+            # Qualify if we have at least MIN_CONSECUTIVE_GAMES consecutive hits
+            if len(consecutive_games) >= MIN_CONSECUTIVE_GAMES:
+                return True, consecutive_games
+            else:
+                return False, []
+
         prop_groups, total_checked = {}, 0
         total_batches = (len(props) // BATCH_SIZE) + (1 if len(props) % BATCH_SIZE else 0)
 
@@ -197,60 +235,45 @@ def fetch_nba_props():
                 df = get_player_logs(p["player"])
                 if df.empty:
                     continue
-                vals = df[stat_col].tolist()
-                if len(vals) < MIN_GAMES:
-                    continue
-
-                if STRICT_ALL:
-                    ok = all((v > p["line"]) if p["side"] == "Over" else (v < p["line"]) for v in vals)
-                    if not ok:
-                        continue
-                    hit_rate = 1.0
-                else:
-                    if p["side"] == "Over":
-                        hits = sum(1 for v in vals if v > p["line"])
-                    else:
-                        hits = sum(1 for v in vals if v < p["line"])
-                    hit_rate = hits / len(vals)
-                    if hit_rate < SEASON_THRESHOLD:
-                        continue
-
-                prop_key = (p["player"], p["market"], p["line"], p["side"], p["game"])
-                if prop_key not in prop_groups:
-                    avg_val = sum(vals)/len(vals)
-                    record = {
-                        "game": p["game"],
-                        "game_time": p["game_time"],
-                        "market": p["market"].replace('_',' ').title(),
-                        "player": p["player"],
-                        "side": p["side"],
-                        "line": float(p["line"]),
-                        "bookmakers": [],
-                        "season_avg": round(float(avg_val),1),
-                        "recent_values": [float(v) for v in vals],
-                        "games_played": len(vals)
-                    }
-                    if not STRICT_ALL:
-                        record["season_hit_rate"] = round(hit_rate, 3)
-                    prop_groups[prop_key] = record
-
-                prop_groups[prop_key]["bookmakers"].append({
-                    "name": p["bookmaker"],
-                    "title": p["bookmaker_title"],
-                    "odds": int(p["odds"])
-                })
+                
+                ok, consecutive_vals = qualifies_consecutive(df, stat_col, p["line"], p["side"])
+                
+                if ok:
+                    prop_key = (p["player"], p["market"], p["line"], p["side"], p["game"])
+                    if prop_key not in prop_groups:
+                        avg_val = sum(consecutive_vals) / len(consecutive_vals)
+                        prop_groups[prop_key] = {
+                            "game": p["game"],
+                            "game_time": p["game_time"],
+                            "market": p["market"].replace('_',' ').title(),
+                            "player": p["player"],
+                            "side": p["side"],
+                            "line": float(p["line"]),
+                            "bookmakers": [],
+                            "season_avg": round(float(avg_val), 1),
+                            "recent_values": [float(v) for v in consecutive_vals],
+                            "streak_length": len(consecutive_vals)
+                        }
+                    
+                    prop_groups[prop_key]["bookmakers"].append({
+                        "name": p["bookmaker"],
+                        "title": p["bookmaker_title"],
+                        "odds": int(p["odds"])
+                    })
 
             save_cache(cache)
             with data_lock:
                 latest_props_data.update({
                     "last_updated": datetime.now(ET).isoformat(),
+                    "current_day": datetime.now(ET).strftime('%A, %B %d'),
+                    "games": games_info,
                     "props": _dedupe_and_sort_bookmakers(list(prop_groups.values())),
                     "summary": {
                         "total_props_checked": total_checked,
                         "qualified_so_far": len(prop_groups),
                         "batches_done": b + 1,
                         "total_batches": total_batches,
-                        "mode": "STRICT ALL" if STRICT_ALL else f"HIT-RATE ≥ {SEASON_THRESHOLD}",
+                        "mode": f"CONSECUTIVE STREAK (min {MIN_CONSECUTIVE_GAMES} games)",
                         "season": season_label
                     },
                     "error": None
@@ -263,7 +286,7 @@ def fetch_nba_props():
         with data_lock:
             latest_props_data["last_updated"] = datetime.now(ET).isoformat()
             latest_props_data["props"] = _dedupe_and_sort_bookmakers(list(prop_groups.values()))
-            latest_props_data["summary"]["total_consistent"] = len(prop_groups)
+            latest_props_data["summary"]["total_qualified"] = len(prop_groups)
 
     except Exception as e:
         logger.error(f"NBA props error: {e}")
